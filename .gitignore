@@ -1,0 +1,11 @@
+# Local dependencies and generated output
+node_modules/
+coverage/
+*.tgz
+*.log
+
+# Local environment and machine metadata
+.env
+.env.*
+!.env.example
+.DS_Store

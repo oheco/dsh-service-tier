@@ -1,0 +1,4 @@
+- insert:
+    - id: oheco-service-tier
+      name: '@oheco/dsh-service-tier'
+      config: {}
