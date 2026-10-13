@@ -10,6 +10,7 @@ import { LlmRuntime } from '@deepseek-ai/dsh-llm';
 import { InMemoryCredentialStore, defaultProviderAuthContext } from '@earendil-works/pi-ai';
 import { Config as PiConfig, apply as applyPi } from '@deepseek-ai/dsh-llm-pi-ai';
 import { ExistingConnections, FastRequests, resolveRouteModel } from '../adapter.js';
+import { Config } from '../config.js';
 import { TierOperations, RequestTiers, payloadHook, fastHeaders, sessionRecordSchema, tiersForApi } from '../core.js';
 
 const PROVIDER = 'existing-relay';
@@ -256,6 +257,20 @@ for (const api of ['openai-responses', 'openai-completions', 'anthropic-messages
       tiers.set('ultra', 'default'); await collect(fast.stream(ultraRetry, () => { throw new Error('Ultrafast snapshot lost'); }));
       assert.equal(wire.requests.at(-1).body.service_tier, 'ultrafast');
     }
+    const defaults = Config({ openaiDefaultMode: 'ultrafast', anthropicDefaultMode: 'fast' }), defaultRecords = new Map();
+    const defaultModes = new TierOperations({ defaults, sessions: { get: id => defaultRecords.get(id), put: async (id, value) => defaultRecords.set(id, value) }, describeModel: input => routes.describe(input) });
+    const defaultFast = new FastRequests({ connections: routes, readTier: (id, selection) => defaultModes.readTier(id, selection), adapterConfig });
+    await collect(defaultFast.stream(request('unselected-root'), () => { throw new Error('Protocol default must decorate the actual request'); }));
+    assert.equal(wire.requests.at(-1).body[api === 'anthropic-messages' ? 'speed' : 'service_tier'], api === 'anthropic-messages' ? 'fast' : 'ultrafast');
+    assert.equal(defaultRecords.size, 0, 'A request using the default does not persist an override.');
+    for (const purpose of ['title', 'compaction']) {
+      const auxiliary = { ...request('unselected-root'), purpose };
+      await collect(defaultFast.stream(auxiliary, () => runtime.stream(auxiliary)));
+      assert.equal(wire.requests.at(-1).body.speed, undefined); assert.equal(wire.requests.at(-1).body.service_tier, undefined);
+    }
+    await defaultModes.setSession({ sessionId: 'unselected-root', tier: 'default', revision: 0 });
+    await collect(defaultFast.stream(request('unselected-root'), () => runtime.stream(request('unselected-root'))));
+    assert.equal(wire.requests.at(-1).body.speed, undefined); assert.equal(wire.requests.at(-1).body.service_tier, undefined);
     wire.reject(); const before = wire.requests.length;
     const failed = await collect(fast.stream(request('b'), () => { throw new Error('No automatic downgrade'); }), false);
     assert.equal(failed.at(-1).reason.kind, 'error'); assert.equal(wire.requests.length, before + 1); assert.equal(tiers.get('b'), 'fast');

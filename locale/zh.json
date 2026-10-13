@@ -1,1 +1,1 @@
-{"meta":{"title":"快速模式","description":"为已有连接提供标准、快速和 OpenAI 超快速选项；委派子 agent 在创建时继承父会话模式，无需额外配置。"}}
+{"meta":{"title":"快速模式","description":"为已有连接提供处理模式；在本插件配置页分别设置 OpenAI 和 Anthropic 默认值，委派子 agent 创建时继承父会话的有效模式。"}}

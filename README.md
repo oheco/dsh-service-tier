@@ -6,7 +6,7 @@
 
 ## 使用
 
-安装后重启当前 DSH，再刷新 Web GUI。在原有模型选择器附近选择模式，从下一次模型请求生效。已有会话选择保留；新根会话默认为标准。
+安装后重启当前 DSH，再刷新 Web GUI。在原有模型选择器附近选择模式，从下一次模型请求生效。已有会话选择保留；尚未保存选择的会话使用插件配置页为其连接协议设置的默认模式，初始值均为标准。
 
 参数由连接实际使用的协议决定，与模型名称无关：
 
@@ -26,10 +26,27 @@
 
 原来的独立连接配置卡片和独立模型目录已移除。旧 `ultrafast` 记录现在保留为超快速，修订号不变。旧插件专属连接配置不参与请求；原有 DSH 连接、凭据和模型配置不被改写。
 
+## 插件默认配置
+
+0.2.2 在侧栏 **插件 → 快速模式** 的插件详情页提供两个默认模式下拉框：
+
+| 配置项 | 可选模式 | 初始值 |
+| --- | --- | --- |
+| OpenAI 默认模式 | 标准 / 快速 / 超快速 | 标准 |
+| Anthropic 默认模式 | 标准 / 快速 | 标准 |
+
+编辑后点击 **保存** 才写入。取消修改或离开页面会丢弃草稿。两个值通过 DSH 公共 `configForms` 服务一次提交，以编辑开始时的修订号检查并发修改；被拒绝时保留草稿并提示取消后重新编辑。只读连接不允许保存。配置归属本插件的 `Config`，持久化由 DSH 原生插件配置编辑器写入 profile 的 Cordis patch。
+
+默认值按已有连接的实际协议解析，不依赖模型名称。保存后实时生效，无需重启插件；同一个已经开始的请求对象仍保留自己的模式快照。仅尚未保存模式的会话跟随默认配置，包括以前创建但一直没有选择模式的根会话。读取默认值不生成会话记录。通过菜单、工具或命令明确选择的模式优先，选择标准也会保存为覆盖；在菜单中再次点击当前默认模式同样会保存选择。
+
+委派子 agent 在创建时保存父会话的**有效模式**，父会话没有明确选择时也包括其协议默认值。之后修改默认值或父模式，不覆盖子会话已保存的继承记录。父 agent 离线且没有模式记录时，通过公开的只读 Session Persistence 接口读取其最后请求头中的连接与模型；两个默认值均为标准时不需要读取父会话日志。
+
 ## 安装和卸载
 
+仓库不提供发行包。以下为已有安装包的通用安装命令示例：
+
 ```zsh
-dsh plugin --profile web add /absolute/path/to/oheco-dsh-service-tier-0.2.1.tgz
+dsh plugin --profile web add /absolute/path/to/oheco-dsh-service-tier.tgz
 dsh plugin --profile web remove @oheco/dsh-service-tier
 ```
 
@@ -44,7 +61,7 @@ dsh plugin --profile web remove @oheco/dsh-service-tier
 - 模型配置继承安装版目录，保留 `modelOverrides`、`reasoningEfforts` 映射、headers、协议适用的 compat、缓存、传输和图片预算。认证沿用原有凭据引用和 pi-ai 凭据记录，包括原有授权刷新路径。
 - pi-ai 原生 `onPayload` 在最终请求体中加入所选参数；Anthropic beta 标头与已有标头合并。不会修改冻结的 DSH 请求。
 - `WeakMap` 固定同一请求对象的选择和配置；`AsyncLocalStorage` 隔离并发请求。会话选择由 `storageDomain` 持久化，并检查修订号。继承操作与用户切换共用写入队列，在 serial `agent/created` 监听器中等待持久化完成后才允许子 agent 开始运行；插件就绪也等待已存在子会话补齐。
-- Client 只依赖 React/ReactDOM 模块和公开插槽、语言、连接服务。菜单采用 DSH ModelSelect/MenuSurface 的布局、主题颜色、菜单材质和键盘模式，包含单选勾选、方向键、Home/End、Escape、Tab、焦点恢复、外部点击和视口定位；没有依赖 DSH Client 控件包。
+- Client 只通过 React/ReactDOM 模块和公开插槽、语言、连接、`configForms` 服务工作。插件自己的配置表单注册于 `plugins.bundle.config`，只编辑两个 `.volatile()` 默认模式引用；不注册全局设置页面。菜单采用 DSH ModelSelect/MenuSurface 的布局、主题颜色、菜单材质和键盘模式，包含单选勾选、方向键、Home/End、Escape、Tab、焦点恢复、外部点击和视口定位；没有导入 DSH Client 控件包。
 - RPC 使用 `/api/oheco-service-tier/*` 精确认证 POST 路由，保留唯一的 DSH `/api` 网关拦截器。Host 按协议返回可选档位，Client 使用该列表渲染。
 - `/service-tier` 查询选择，`/service-tier fast`、`/service-tier ultrafast` 设置对应模式，`/service-tier standard` 或 `default` 切回标准。`service_tier` 工具与菜单调用同一后端操作，只操作当前会话，从会话请求头的 `config` 读取已有连接和模型，也允许显式指定。
 
@@ -59,10 +76,12 @@ DSH_TEST_RUNTIME=/absolute/path/to/dsh/runtime npm test
 
 在原开发机上可直接运行 `npm test`。
 
-13 项测试覆盖真实 Connection 插件和签名认证、严格服务注入、已有目录读取、会话隔离与冲突、旧记录兼容、真实 JSON 存储重开、三种协议的实际本地 HTTP/SSE 请求、原版标准请求对照、文件/图片降级投影、工具参数、助手消息回放、并发、请求快照、beta 标头合并和中转拒绝时不降档。
+18 项测试覆盖真实 Connection 插件和签名认证、严格服务注入、已有目录读取、会话隔离与冲突、旧记录兼容、真实 JSON 存储重开、三种协议的实际本地 HTTP/SSE 请求、原版标准请求对照、文件/图片降级投影、工具参数、助手消息回放、并发、请求快照、beta 标头合并和中转拒绝时不降档。
 
 新增真实 AgentRegistry 生命周期测试验证普通/fork 子会话、孙级继承、初次加载补齐、恢复/重载保留覆盖、父 agent 离线时继承持久化选择，以及工具/命令独立切换。Session、Tools、Commands 使用隔离 fixture；未启动付费模型 agent。OpenAI HTTP 测试验证 fast/ultrafast 并发隔离、子会话 ultrafast、重试快照和拒绝后不降档；Anthropic 拒绝 ultrafast且不发请求。
 
-测试服务器只在测试期间运行，使用系统分配端口；临时目录位于 `$TMPDIR`，结束后清理。测试不发送付费模型请求。缺少浏览器控制工具，因此视觉和真实浏览器交互仍需重启后验收；也未验证用户远端账号的权限、实际速度和计费。
+默认配置测试验证本地化 schema、合法选项与初始值、实际协议的默认 payload、读取默认值不写会话记录、显式标准覆盖、实时修改后的请求快照，以及父模式来自默认值时的普通/fork/离线继承。安装版 Settings 服务测试验证两个字段出现在描述中、一次原子修改生效、过期修订号拒绝、无效 Anthropic 超快速不导致部分修改，以及保存记录不受默认更新影响；配置编辑器使用隔离 fixture，不写用户 profile。
+
+测试服务器只在测试期间运行，使用系统分配端口；临时目录位于 `$TMPDIR`，结束后清理。测试不发送付费模型请求。本次 0.2.2 仅更新源码，未打包、发布或升级当前安装，新增配置页的实际浏览器显示与保存交互需安装该源码后验收；用户远端账号权限、实际速度和计费未验证。
 
 协议来源：[OpenAI Fast mode](https://developers.openai.com/api/docs/guides/fast-mode)、[OpenAI Ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode)、[Anthropic Fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode)。许可证：MIT。

@@ -42,7 +42,7 @@ test('real assembly: sibling services, signed authentication, exact routes, and 
     serviceCtx.provide('storage', { backend: { get: () => backend } });
     facility = new DomainFacility(serviceCtx, { backend: 'json' });
     serviceCtx.provide('storageDomain', facility);
-    serviceCtx.provide('settings', { describe: () => [{ ns: 'pi-fixture', revision: 0, value: { providers: { existing: { api: 'openai-responses', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'fixture-model' }] } } } }] });
+    serviceCtx.provide('settings', { configure: () => () => {}, describe: () => [{ ns: 'pi-fixture', revision: 0, value: { providers: { existing: { api: 'openai-responses', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'fixture-model' }] } } } }] });
     serviceCtx.provide('credentials', {
       describe: async () => ({ configured: false, writable: true }),
       async modifyRecord(key, modify) {

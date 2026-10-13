@@ -7,7 +7,8 @@ import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import { childSessionMeta } from '@deepseek-ai/dsh-subagent';
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain';
 import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json';
-import { apply, inject } from '../index.js';
+import { apply, inject, Config } from '../index.js';
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence';
 
 // Exercise the real registry's awaited agent/created dispatch with isolated
 // Session-shaped fixtures; no paid model, parent config, or user log is touched.
@@ -16,6 +17,7 @@ test('real agent lifecycle: fresh/fork children inherit before announce resolves
   const owned = await realpath(directory), backend = new JsonStorageBackend(directory), ctx = new Context();
   const routes = new Map(), detachers = [], tools = new Set(), commands = new Map();
   let registry, facility;
+  const storedHeaders = new Map(), closedReads = [];
   t.after(async () => {
     for (const detach of detachers.reverse()) detach();
     await ctx.fiber.dispose(); await facility?.closeAll(); await backend.close();
@@ -29,25 +31,31 @@ test('real agent lifecycle: fresh/fork children inherit before announce resolves
     serviceCtx.provide('storage', { backend: { get: () => backend } });
     serviceCtx.provide('storageDomain', facility);
     serviceCtx.provide('credentials', {});
+    serviceCtx.provide('sessionPersistence', { async open(id, access) {
+      assert.equal(access, 'read');
+      if (!storedHeaders.has(id)) throw new SessionPersistenceNotFoundError(id);
+      return { async read() { return { events: [{ type: 'request/header', data: { header: { config: storedHeaders.get(id) } } }] }; }, async close() { closedReads.push(id); } };
+    } });
     serviceCtx.provide('tools', { register(definition) { tools.add(definition); return () => tools.delete(definition); } });
     serviceCtx.provide('commands', { register(definition) { commands.set(definition.name, definition); return () => commands.delete(definition.name); } });
-    serviceCtx.provide('llm', { listProviders: () => [{ id: 'existing' }], listConfigurableProviders: () => [{ provider: 'existing', settingsNs: 'pi-fixture', settingsPath: ['providers', 'existing'] }] });
-    serviceCtx.provide('settings', { describe: () => [{ ns: 'pi-fixture', revision: 0, value: { providers: { existing: { api: 'openai-responses', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'fixture-model' }] } } } }] });
+    const providers = ['existing', 'anthropic'];
+    serviceCtx.provide('llm', { listProviders: () => providers.map(id => ({ id })), listConfigurableProviders: () => providers.map(provider => ({ provider, settingsNs: 'pi-fixture', settingsPath: ['providers', provider] })) });
+    serviceCtx.provide('settings', { configure: () => () => {}, describe: () => [{ ns: 'pi-fixture', revision: 0, value: { providers: Object.fromEntries(providers.map(provider => [provider, { api: provider === 'existing' ? 'openai-responses' : 'anthropic-messages', baseURL: 'https://fixture.invalid/v1', models: [{ id: 'fixture-model' }] }])) } }] });
     serviceCtx.provide('connection', { fetch: { register(route) { routes.set(route.path, route); return () => routes.delete(route.path); } } });
   } });
-  async function makeAgent(id, parent, seeded = false, source = 'startup', origin = 'subagent') {
+  async function makeAgent(id, parent, seeded = false, source = 'startup', origin = 'subagent', provider = 'existing') {
     let agent;
     await ctx.plugin({ name: `fixture-agent-${id}`, apply(agentCtx) {
       const meta = parent ? { ...childSessionMeta(parent, (parent.session.header.delegationDepth ?? 0) + 1, seeded), origin } : { isSeeded: false };
-      agent = { id, options: { provider: 'existing', model: 'fixture-model' }, status: 'idle', ctx: agentCtx,
-        session: { id, header: { id, ...meta }, requestHeader: () => ({ config: { provider: 'existing', model: 'fixture-model' } }) } };
+      agent = { id, options: { provider, model: 'fixture-model' }, status: 'idle', ctx: agentCtx,
+        session: { id, header: { id, ...meta }, requestHeader: () => ({ config: { provider, model: 'fixture-model' } }) } };
     } });
-    detachers.push(registry.enter(agent, parent));
+    detachers.push(registry.enter(agent, parent ? registry.get(parent.id) : undefined));
     await registry.announce(agent, source);
     return agent;
   }
-  async function mount() {
-    const plugin = await ctx.plugin({ name: 'fixture-service-tier', inject, apply });
+  async function mount(config = {}) {
+    const plugin = await ctx.plugin({ name: 'fixture-service-tier', inject, Config, apply }, config);
     assert.equal(plugin.state, 2);
     return plugin;
   }
@@ -79,7 +87,19 @@ test('real agent lifecycle: fresh/fork children inherit before announce resolves
   await plugin.dispose();
   // A child started while the plugin was inactive is backfilled on activation.
   await makeAgent('backfill', parent);
-  plugin = await mount();
+  const implicitParent = await makeAgent('implicit-parent');
+  await makeAgent('implicit-child', implicitParent); await makeAgent('implicit-fork', implicitParent, true);
+  await makeAgent('cross-protocol-child', implicitParent, false, 'startup', 'subagent', 'anthropic');
+  await makeAgent('anthropic-root', undefined, false, 'startup', undefined, 'anthropic');
+  plugin = await mount({ openaiDefaultMode: 'ultrafast', anthropicDefaultMode: 'fast' });
+  assert.deepEqual(await choice('implicit-parent'), { sessionId: 'implicit-parent', tier: 'ultrafast', revision: 0 });
+  for (const id of ['implicit-child', 'implicit-fork', 'cross-protocol-child']) assert.equal((await choice(id)).tier, 'ultrafast');
+  assert.equal((await choice('anthropic-root')).tier, 'fast');
+  storedHeaders.set('offline-config-parent', { provider: 'anthropic', model: 'fixture-model' });
+  const offline = { ...parent, id: 'offline-config-parent', session: { ...parent.session, id: 'offline-config-parent', header: { id: 'offline-config-parent' } } };
+  await makeAgent('offline-default-child', offline, false, 'resume');
+  assert.equal((await choice('offline-default-child')).tier, 'fast', 'Offline inheritance resolves the parent’s persisted request header, not the child’s OpenAI route.');
+  assert.deepEqual(closedReads, ['offline-config-parent']);
   assert.equal((await choice('backfill')).tier, 'fast');
   assert.equal((await choice('fresh')).tier, 'default');
   assert.equal((await choice('fork')).tier, 'fast');
@@ -100,6 +120,14 @@ test('real agent lifecycle: fresh/fork children inherit before announce resolves
   const command = commands.get('service-tier'); assert.ok(command);
   assert.equal((await command.handler({ agent: resumed, rawInput: 'ultrafast' })).kind, 'success');
   assert.equal((await choice(resumed.id)).tier, 'ultrafast');
+  const previousTools = new Set(tools), broken = await makeAgent('removed-model-root');
+  broken.session.requestHeader = () => ({ config: { provider: 'existing', model: 'removed-model' } });
+  const brokenTool = [...tools].find(definition => !previousTools.has(definition)); assert.ok(brokenTool);
+  await brokenTool.execute({ action: 'set', tier: 'default' }, { signal });
+  assert.equal((await choice(broken.id)).tier, 'default', 'Standard remains selectable even if a configured speed default cannot resolve the model.');
+  const brokenCommand = await makeAgent('removed-model-command'); brokenCommand.session.requestHeader = broken.session.requestHeader;
+  assert.equal((await command.handler({ agent: brokenCommand, rawInput: 'standard' })).kind, 'success');
+  assert.equal((await choice(brokenCommand.id)).tier, 'default');
   await plugin.dispose();
   assert.equal(routes.size, 0); assert.equal(tools.size, 0); assert.equal(commands.size, 0);
 });

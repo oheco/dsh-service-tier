@@ -7,6 +7,8 @@ window.__ModuleLoader__.load({
       zh: { default: '标准', fast: '快速', ultrafast: '超快速', label: '处理速度', hint: '从下一次请求生效。快速和超快速可能采用更高价格；中转站或模型不支持时，请切回标准或其他支持的模式。', reload: '重新加载', error: '处理速度加载失败' },
       en: { default: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast', label: 'Processing speed', hint: 'Applies to the next request. Fast and Ultrafast may cost more; select Standard or a supported mode if the gateway or model rejects it.', reload: 'Reload', error: 'Unable to load processing mode' },
     };
+    Object.assign(dicts.zh, { openaiDefaultMode: 'OpenAI 默认模式', anthropicDefaultMode: 'Anthropic 默认模式', configHint: '用于尚未保存模式选择的会话；已有会话选择和子 agent 继承的模式优先。', configLoading: '正在加载配置…', configUnavailable: '插件配置当前不可用。', configReadOnly: '当前连接的插件配置只读。', configSave: '保存', configSaving: '保存中…', configDiscard: '取消修改', configSaved: '配置已保存，下次请求生效。', configSaveFailed: '保存失败，已保留修改。配置可能已被其他页面修改，请取消修改后重新编辑。' });
+    Object.assign(dicts.en, { openaiDefaultMode: 'OpenAI default mode', anthropicDefaultMode: 'Anthropic default mode', configHint: 'Applies to sessions without a saved mode. Existing choices and inherited child modes take precedence.', configLoading: 'Loading configuration…', configUnavailable: 'Plugin configuration is unavailable.', configReadOnly: 'Plugin configuration is read-only on this connection.', configSave: 'Save', configSaving: 'Saving…', configDiscard: 'Discard changes', configSaved: 'Saved. Applies to the next request.', configSaveFailed: 'Unable to save; your edits were kept. Another view may have changed the configuration. Discard and edit again.' });
     // DSH ModelSelect/MenuSurface layout (MIT), using plugin-prefixed classes.
     const css = `
 .ost-root{position:relative;display:flex;align-items:center;min-width:0;font:inherit}
@@ -18,6 +20,7 @@ window.__ModuleLoader__.load({
 .ost-option{appearance:none;display:flex;align-items:center;gap:8px;width:100%;min-height:36px;border:0;border-radius:12px;padding:8px 12px;background:transparent;color:inherit;text-align:left;font:inherit;font-size:14px;line-height:20px;cursor:pointer;outline:none}.ost-option:hover:enabled,.ost-option:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}.ost-option:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
 .ost-option-label{flex:1}.ost-check{flex:none;color:var(--dsw-alias-state-business-primary)}.ost-hint{padding:8px 12px 6px;color:var(--dsw-alias-label-caption);font-size:12px;line-height:18px}
 .ost-error{color:var(--dsw-alias-state-error-primary);font-size:12px}.ost-reload{border:0;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:12px;padding:4px}
+.ost-config{display:flex;flex-direction:column;gap:16px;max-width:760px;color:var(--dsw-alias-label-primary);font:inherit}.ost-config p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}.ost-config-field{display:grid;grid-template-columns:minmax(0,1fr) 220px;align-items:center;gap:16px;padding:12px 0;border-bottom:.5px solid var(--dsw-alias-border-l4)}.ost-config-field label{font-size:14px;line-height:20px}.ost-config select{width:100%;height:36px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;font-size:13px}.ost-config-actions{display:flex;align-items:center;gap:10px}.ost-config-actions button{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);padding:7px 16px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;font-size:13px;cursor:pointer}.ost-config button:hover:enabled{background:var(--dsw-alias-interactive-bg-hover)}.ost-config select:focus-visible,.ost-config button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.ost-config :disabled{opacity:.5;cursor:default}.ost-config .ost-error{color:var(--dsw-alias-state-error-primary)}@media(max-width:620px){.ost-config-field{grid-template-columns:1fr;gap:8px}}
 `;
     const icon = (path, className) => h('svg', { className, width: 16, height: 16, viewBox: '0 0 24 24', 'aria-hidden': true }, h('path', { d: path, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round' }));
     return {
@@ -76,7 +79,7 @@ window.__ModuleLoader__.load({
           }, [open, close]);
           async function choose(tier) {
             if (busy) return;
-            close(true); if (tier === state.tier) return;
+            close(true); if (tier === state.tier && state.revision > 0) return;
             const expected = key; generation.current++; setBusy(true); setError('');
             try {
               const result = await rpc('set-session', { sessionId, provider: selection.provider, model: selection.model, tier, revision: state.revision });
@@ -100,6 +103,42 @@ window.__ModuleLoader__.load({
               h('div', { className: 'ost-material', 'data-menu-material': true }),
               ...(state.tiers ?? ['default', 'fast']).map(tier => h('button', { key: tier, className: 'ost-option', type: 'button', role: 'menuitemradio', 'aria-checked': state.tier === tier, disabled: busy, onClick: () => choose(tier) }, h('span', { className: 'ost-option-label' }, t(tier)), state.tier === tier ? icon('m5 12 4 4L19 6', 'ost-check') : null)), h('div', { className: 'ost-hint' }, t('hint'))), document.body) : null);
         }
+        ctx.inject(['configForms'], configCtx => {
+          const form = configCtx.configForms.get('oheco-service-tier');
+          function DefaultModesPanel({ t, view }) {
+            const subscribe = React.useCallback(listener => form.subscribe(listener), []);
+            const getSnapshot = React.useCallback(() => form.getSnapshot(), []);
+            const state = React.useSyncExternalStore(subscribe, getSnapshot);
+            const [draft, setDraft] = React.useState(null), [busy, setBusy] = React.useState(false), [error, setError] = React.useState(''), [saved, setSaved] = React.useState(false);
+            const saving = React.useRef(false), mounted = React.useRef(true), id = React.useId();
+            React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+            if (view === 'summary') return t('configHint');
+            if (state.status !== 'ready' || !state.value) return h('p', { role: 'status' }, t(state.status === 'loading' ? 'configLoading' : 'configUnavailable'));
+            const value = draft?.value ?? state.value, writable = state.writable && state.mode === 'host';
+            const edit = (field, tier) => {
+              setDraft(current => ({ revision: current?.revision ?? state.revision, value: { ...(current?.value ?? state.value), [field]: tier } }));
+              setError(''); setSaved(false);
+            };
+            const discard = () => { setDraft(null); setError(''); setSaved(false); };
+            async function save(event) {
+              event.preventDefault();
+              if (!draft || !writable || saving.current) return;
+              saving.current = true; setBusy(true); setError(''); setSaved(false);
+              try {
+                const accepted = await form.mutate(['openaiDefaultMode', 'anthropicDefaultMode'].map(field => ({ op: 'set', path: [field], value: draft.value[field] })), draft.revision);
+                if (mounted.current) { if (accepted) { setDraft(null); setSaved(true); notify(); } else setError(t('configSaveFailed')); }
+              } catch { if (mounted.current) setError(t('configSaveFailed')); }
+              finally { saving.current = false; if (mounted.current) setBusy(false); }
+            }
+            return h('form', { className: 'ost-config', onSubmit: save, 'aria-busy': busy }, h('style', null, css), h('p', null, t('configHint')),
+              ...[['openaiDefaultMode', ['default', 'fast', 'ultrafast']], ['anthropicDefaultMode', ['default', 'fast']]].map(([field, tiers]) => h('div', { className: 'ost-config-field', key: field },
+                h('label', { htmlFor: `${id}-${field}` }, t(field)), h('select', { id: `${id}-${field}`, value: value[field], disabled: busy || !writable, onChange: event => edit(field, event.target.value) }, ...tiers.map(tier => h('option', { key: tier, value: tier }, t(tier)))))),
+              !writable ? h('p', { role: 'status' }, t('configReadOnly')) : null,
+              h('div', { className: 'ost-config-actions' }, h('button', { type: 'submit', disabled: busy || !writable || !draft }, t(busy ? 'configSaving' : 'configSave')), h('button', { type: 'button', disabled: busy || !draft, onClick: discard }, t('configDiscard'))),
+              error ? h('p', { className: 'ost-error', role: 'alert' }, error) : null, saved ? h('p', { role: 'status' }, t('configSaved')) : null);
+          }
+          configCtx.slots.inject('plugins.bundle.config', () => configCtx.slots.register({ name: 'plugins.bundle.config', key: '@oheco/dsh-service-tier', locale: NS }, DefaultModesPanel));
+        });
         ctx.slots.inject('conversation.input.right', () => {
           const dispose = ctx.slots.register({ name: 'conversation.input.right', id: 'oheco-service-tier', order: 30, locale: NS }, TierControl);
           rpc('client-ready', { slot: 'conversation.input.right', registered: true }).catch(() => {});

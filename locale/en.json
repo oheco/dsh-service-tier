@@ -1,1 +1,1 @@
-{"meta":{"title":"Fast mode","description":"Choose Standard, Fast, or OpenAI Ultrafast for existing connections and models. Delegated children inherit the parent’s mode at creation."}}
+{"meta":{"title":"Fast mode","description":"Choose processing modes for existing connections. Set OpenAI and Anthropic defaults on this plugin’s page; delegated children inherit the parent’s effective mode."}}

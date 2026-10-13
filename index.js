@@ -6,12 +6,16 @@ import { LlmError, assertUsableApiKey, resolveImageAttachmentAccess } from '@dee
 import { recordKeyFor } from '@deepseek-ai/dsh-llm-pi-ai';
 import { defaultProviderAuthContext } from '@earendil-works/pi-ai';
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment';
+import { foldRequestHeader } from '@deepseek-ai/dsh-session';
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence';
+import { Config } from './config.js';
+export { Config };
 import { ExistingConnections, FastRequests } from './adapter.js';
 import { RPC_CHANNEL, RPC_PREFIX, TierError, TierOperations, sessionRecordSchema } from './core.js';
 
 export const name = 'oheco-service-tier';
 export const inject = ['llm', 'credentials', 'settings', 'storageDomain', 'connection'];
-export const VERSION = '0.2.1';
+export const VERSION = '0.2.2';
 const dataSpec = defineDomain({
   name: 'oheco_service_tier', version: 1,
   global: { schema: z.object({ hostStarted: z.string(), hostVersion: z.string().default(''), hostReady: z.boolean().default(false), clientSlots: z.record(z.string(), z.string()) }), initial: { hostStarted: '', hostVersion: '', hostReady: false, clientSlots: {} } },
@@ -26,15 +30,24 @@ function storedCredential(value) {
   if (value.type === 'api_key') return { kind: 'api-key', ...(value.key === undefined ? {} : { key: value.key }), ...(value.env === undefined ? {} : { env: value.env }) };
   return { kind: 'grant', payload: JSON.parse(JSON.stringify(value)) };
 }
-export async function apply(ctx) {
+function selectionOf(agent) {
+  const config = agent?.session.requestHeader?.()?.config;
+  return { provider: config?.provider ?? agent?.options.provider, model: config?.model ?? agent?.options.model };
+}
+export async function apply(ctx, config = Config({})) {
+  ctx.effect(() => ctx.settings.configure({ auto: false }, ctx.fiber));
   const domain = await ctx.storageDomain.open(dataSpec);
   ctx.effect(() => () => domain.close());
   await domain.global.set({ hostStarted: new Date().toISOString(), hostVersion: VERSION, hostReady: false, clientSlots: {} });
   const connections = new ExistingConnections({ directory: () => ctx.llm.listConfigurableProviders(), settings: () => ctx.settings.describe(), activeProviders: () => ctx.llm.listProviders().map(provider => provider.id) });
-  const operations = new TierOperations({ sessions: domain.table('sessions'), describeModel: input => connections.describe(input) });
+  let sessionSelection = () => undefined;
+  const operations = new TierOperations({ sessions: domain.table('sessions'), defaults: config, describeModel: input => {
+    const active = sessionSelection(input?.sessionId);
+    return connections.describe({ provider: input?.provider ?? active?.provider, model: input?.model ?? active?.model });
+  } });
   const ambient = defaultProviderAuthContext();
   const fast = new FastRequests({
-    connections, readTier: sessionId => operations.readTier(sessionId),
+    connections, readTier: (sessionId, selection) => operations.readTier(sessionId, selection),
     requestServices: () => ({ attachments: ctx.get('attachments'), fs: ctx.get('fs') }),
     adapterConfig: {
       async resolveApiKey(provider, profile) {
@@ -102,6 +115,19 @@ export async function apply(ctx) {
   }));
   // Share the UI's session operation with agents; no key/configuration tools.
   await ctx.inject(['agents'], async agentCtx => {
+    sessionSelection = sessionId => selectionOf(agentCtx.agents.get(sessionId));
+    agentCtx.effect(() => () => { sessionSelection = () => undefined; });
+    let storedSelection = async () => undefined;
+    await agentCtx.inject(['sessionPersistence'], persistenceCtx => {
+      storedSelection = async sessionId => {
+        let handle;
+        try { handle = await persistenceCtx.sessionPersistence.open(sessionId, 'read'); }
+        catch (error) { if (error instanceof SessionPersistenceNotFoundError) return undefined; throw error; }
+        try { return foldRequestHeader((await handle.read()).events)?.config; }
+        finally { await handle.close(); }
+      };
+      persistenceCtx.effect(() => () => { storedSelection = async () => undefined; });
+    });
     const attached = new Map();
     const attach = agent => {
       if (attached.has(agent)) return;
@@ -112,9 +138,10 @@ export async function apply(ctx) {
           output: { schema: { type: 'object', properties: { sessionId: { type: 'string' }, tier: { type: 'string', enum: ['default', 'fast', 'ultrafast'] }, revision: { type: 'integer' } }, required: ['sessionId', 'tier', 'revision'], additionalProperties: false }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
           async execute(args, exec) {
             if (exec.signal.aborted) throw new TierError('CANCELLED', 'Request cancelled.');
-            const state = operations.getSession({ sessionId: String(agent.session.id) });
+            const sessionId = String(agent.session.id);
+            if (args.action === 'get') return operations.getSession({ ...args, sessionId });
             const active = agent.session.requestHeader?.()?.config;
-            return args.action === 'get' ? state : operations.setSession({ provider: active?.provider, model: active?.model, ...args, sessionId: state.sessionId, revision: state.revision });
+            return operations.setSession({ provider: active?.provider, model: active?.model, ...args, sessionId, revision: operations.revisionOf(sessionId) });
           },
         }));
         return () => fiber.dispose();
@@ -124,7 +151,12 @@ export async function apply(ctx) {
     const initialize = async agent => {
       const { origin, parentSession } = agent.session.header;
       if (origin === 'subagent' && parentSession !== undefined) {
-        await operations.inheritSession({ sessionId: String(agent.session.id), parentSessionId: String(parentSession) });
+        await operations.inheritSession({ sessionId: String(agent.session.id), parentSessionId: String(parentSession),
+          resolveParentSelection: () => {
+            const parent = agentCtx.agents.get(parentSession);
+            return parent ? selectionOf(parent) : storedSelection(parentSession);
+          },
+        });
       }
       attach(agent);
     };
@@ -141,11 +173,10 @@ export async function apply(ctx) {
       name: 'service-tier', description: 'Read or set this session’s processing mode: default (Standard), fast, ultrafast (OpenAI).',
       async handler({ agent, rawInput }) {
         try {
-          const state = operations.getSession({ sessionId: String(agent.session.id) });
-          const tier = rawInput.trim();
-          if (!tier) return { kind: 'success', text: `Processing mode: ${state.tier}` };
+          const sessionId = String(agent.session.id), tier = rawInput.trim();
+          if (!tier) return { kind: 'success', text: `Processing mode: ${operations.getSession({ sessionId }).tier}` };
           const active = agent.session.requestHeader()?.config;
-          const next = await operations.setSession({ sessionId: state.sessionId, provider: active?.provider, model: active?.model, tier: tier === 'standard' ? 'default' : tier, revision: state.revision });
+          const next = await operations.setSession({ sessionId, provider: active?.provider, model: active?.model, tier: tier === 'standard' ? 'default' : tier, revision: operations.revisionOf(sessionId) });
           return { kind: 'success', text: `Processing mode: ${next.tier}` };
         } catch (error) { return { kind: 'error', text: error instanceof TierError ? error.message : 'Unable to update processing mode.' }; }
       },

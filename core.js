@@ -13,6 +13,10 @@ export function tiersForApi(api) {
   if (api === 'openai-responses' || api === 'openai-completions') return [...TIERS];
   return api === 'anthropic-messages' ? ['default', 'fast'] : ['default'];
 }
+export function defaultModeForApi(api, config = {}) {
+  const value = api === 'openai-responses' || api === 'openai-completions' ? config.openaiDefaultMode : api === 'anthropic-messages' ? config.anthropicDefaultMode : undefined;
+  return (typeof value?.get === 'function' ? value.get() : value) ?? 'default';
+}
 export function assertTierForApi(api, tier) {
   if (!tiersForApi(api).includes(tier)) throw new TierError('UNSUPPORTED_TIER', `The connection protocol "${api}" does not support ${tier} mode. Select Standard or a supported mode.`);
 }
@@ -38,15 +42,19 @@ export function fastHeaders(api, headers) {
   return Object.fromEntries(result);
 }
 export class TierOperations {
-  constructor({ sessions, describeModel }) {
-    this.sessions = sessions; this.describeModel = describeModel; this.writes = Promise.resolve();
+  constructor({ sessions, describeModel, defaults = {} }) {
+    this.sessions = sessions; this.describeModel = describeModel; this.defaults = defaults; this.writes = Promise.resolve();
   }
+  revisionOf(sessionId) { return this.sessions.get(parseSessionId(sessionId))?.revision ?? 0; }
+  hasSpeedDefault() { return defaultModeForApi('openai-responses', this.defaults) !== 'default' || defaultModeForApi('anthropic-messages', this.defaults) !== 'default'; }
   getSession(input) {
     const sessionId = parseSessionId(input?.sessionId);
-    const record = this.sessions.get(sessionId) ?? { tier: 'default', revision: 0 };
-    return { sessionId, tier: record.tier, revision: record.revision };
+    const record = this.sessions.get(sessionId);
+    if (record !== undefined) return { sessionId, tier: record.tier, revision: record.revision };
+    const tier = this.hasSpeedDefault() ? defaultModeForApi(this.describeModel(input).api, this.defaults) : 'default';
+    return { sessionId, tier, revision: 0 };
   }
-  readTier(sessionId) { return sessionId ? this.getSession({ sessionId }).tier : 'default'; }
+  readTier(sessionId, selection) { return sessionId ? this.getSession({ ...selection, sessionId }).tier : 'default'; }
   inheritSession(input) {
     const run = async () => {
       const sessionId = parseSessionId(input?.sessionId);
@@ -54,7 +62,8 @@ export class TierOperations {
       if (sessionId === parentSessionId) throw new TierError('INVALID_PARENT', 'A session cannot inherit its own mode.');
       // Existing child choices (including Standard) survive resume and plugin reload.
       if (this.sessions.get(sessionId) !== undefined) return this.getSession({ sessionId });
-      const tier = this.readTier(parentSessionId);
+      const parentSelection = this.sessions.get(parentSessionId) === undefined && this.hasSpeedDefault() ? await input.resolveParentSelection?.() : undefined;
+      const tier = this.readTier(parentSessionId, parentSelection);
       // Persist Standard too: later parent changes must not alter an existing child.
       await this.sessions.put(sessionId, { tier, revision: 1 });
       return this.getSession({ sessionId });
@@ -65,7 +74,8 @@ export class TierOperations {
   }
   setSession(input) {
     const run = async () => {
-      const state = this.getSession(input);
+      const sessionId = parseSessionId(input?.sessionId);
+      const state = { sessionId, revision: this.revisionOf(sessionId) };
       if (!TIERS.includes(input?.tier)) throw new TierError('INVALID_TIER', 'Choose Standard, Fast, or Ultrafast.');
       if (input.revision !== state.revision) throw new TierError('SESSION_CONFLICT', 'The mode changed in another view. Reload before saving.');
       // Turning Fast off must always work, even if a connection was removed.
@@ -86,7 +96,7 @@ export class RequestTiers {
   constructor(readTier) { this.readTier = readTier; this.snapshots = new WeakMap(); }
   capture(options) {
     if (this.snapshots.has(options)) return this.snapshots.get(options);
-    const tier = options.purpose || !options.sessionId ? 'default' : this.readTier(options.sessionId);
+    const tier = options.purpose || !options.sessionId ? 'default' : this.readTier(options.sessionId, options);
     const captured = { tier, adapter: undefined };
     this.snapshots.set(options, captured);
     return captured;
